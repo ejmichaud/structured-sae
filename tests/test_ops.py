@@ -3,7 +3,7 @@ import torch
 import sys
 import os
 
-from structured_sae.operations import (
+from structured_sae.ops import (
     kronecker_mvm,
     kronecker_mmm,
     sum_kronecker_mvm,
@@ -210,7 +210,6 @@ def test_block_diagonal_mvm4():
         [1., 1., 3., 3.],
         [1., 0., 2., 1.]
     ]), atol=1e-6)
-
 
 
 # def test_block_diagonal_mvm

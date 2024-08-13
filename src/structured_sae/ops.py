@@ -125,8 +125,8 @@ def block_diagonal_mvm(blocks: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
     lds, bm = x.shape[:-1], x.shape[-1]
     assert bm % m == 0
     x = x.reshape(*lds, b, m)
-    y = torch.einsum('bnm,...bm->...bn', blocks, x)
-    return y.reshape(*lds, b*n)
+    ym = torch.einsum('bnm,...bm->...bn', blocks, x)
+    return ym.reshape(*lds, b*n)
 
 # def sum_kronecker_rightmult_mmm(L: torch.Tensor, R: torch.Tensor, U: torch.Tensor) -> torch.Tensor:
 #     """
