@@ -17,17 +17,13 @@ class HDF5ActivationBuffer:
     batch might be activations 0, 32, 64... while the second batch might be
     activations 1, 33, 65... and so on.
 
-    TODO: rewrite to fix bug as identified by test, also consider
-    rewriting to allow for the final buffer size to be smaller
-    than the given buffer size, if n_activations is not a multiple
-    of the buffer size.
-
     Note: on networked storage (om2), this is only about 4x faster than
     computing activations on the fly, via a naive comparison with how
-    long long it took my `save_activations.py` script to run vs. how
+    long it took my `save_activations.py` script to run vs. how
     quickly we can load activations from disk and into GPU memory. It
-    is of course possible that the NNSightActivationBuffer is faster than
-    my script, perhaps if it uses batching.
+    is of course possible that the NNSightActivationBuffer, if it 
+    uses batching or something, would totally close this gap, but
+    I haven't tested it yet.
     """
     def __init__(self, hdf5_path, 
             batch_size=8_192,    # 2^13
@@ -48,12 +44,13 @@ class HDF5ActivationBuffer:
             self.buffer = torch.from_numpy(
                 f['activations'][:self.buffer_size], 
             ).to(self.device, dtype=dtype)
-            print("Loaded activations from HDF5 file, shape:", self.buffer.shape)
+            self.activation_dim = self.buffer.shape[1]
+            # print("Loaded activations from HDF5 file, shape:", self.buffer.shape)
             self.buffer_size = min(self.buffer_size, self.n_activations)
             self.skip = self.buffer_size // self.batch_size
-            print("Buffer size:", self.buffer_size)
-            print("Skip size:", self.skip)
-            print("n_activations:", self.n_activations)
+            # print("Buffer size:", self.buffer_size)
+            # print("Skip size:", self.skip)
+            # print("n_activations:", self.n_activations)
         
         self.buffer_idx = 0
         self.file_idx = 0
@@ -70,10 +67,10 @@ class HDF5ActivationBuffer:
         The buffer size is not necessarily constant, since the last buffer
             may be smaller than buffer_size.
         """
-        print("NEXT HAS BEEN CALLED---------------------") 
-        print("> buffer_idx:", self.buffer_idx)
-        print("> file_idx:", self.file_idx)
-        print("> skip:", self.skip)
+        # print("NEXT HAS BEEN CALLED---------------------") 
+        # print("> buffer_idx:", self.buffer_idx)
+        # print("> file_idx:", self.file_idx)
+        # print("> skip:", self.skip)
         if self.buffer_idx >= self.skip:
             self.file_idx += self.buffer_size
             if self.file_idx >= self.n_activations:
@@ -88,14 +85,14 @@ class HDF5ActivationBuffer:
                     self.buffer_size = len(self.buffer)
                     self.skip = self.buffer_size // self.batch_size
                 self.buffer_idx = 0
-        print("After possible buffer reload:")  
-        print("> buffer_idx:", self.buffer_idx)
-        print("> file_idx:", self.file_idx)
-        print("> skip:", self.skip)
+        # print("After possible buffer reload:")  
+        # print("> buffer_idx:", self.buffer_idx)
+        # print("> file_idx:", self.file_idx)
+        # print("> skip:", self.skip)
 
         batch_idxs = torch.arange(self.buffer_idx, self.buffer_size, self.skip)[:self.batch_size]
         batch = self.buffer[batch_idxs]
 
         self.buffer_idx += 1
-        print("Returning batch: ", batch)        
+        # print("Returning batch: ", batch)        
         return batch
