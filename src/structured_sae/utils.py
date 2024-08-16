@@ -1,4 +1,6 @@
-
+import os
+import json
+from datetime import datetime
 import h5py
 import torch
 
@@ -17,13 +19,16 @@ class HDF5ActivationBuffer:
     batch might be activations 0, 32, 64... while the second batch might be
     activations 1, 33, 65... and so on.
 
-    Note: on networked storage (om2), this is only about 4x faster than
+    NOTE: on networked storage (om2), this is only about 4x faster than
     computing activations on the fly, via a naive comparison with how
     long it took my `save_activations.py` script to run vs. how
     quickly we can load activations from disk and into GPU memory. It
     is of course possible that the NNSightActivationBuffer, if it 
     uses batching or something, would totally close this gap, but
     I haven't tested it yet.
+
+    NOTE: I have tested it now, and it is about 2-3x faster than computing
+    activations on the fly with the ActivationBuffer class. So worth using!
     """
     def __init__(self, hdf5_path, 
             batch_size=8_192,    # 2^13
@@ -96,3 +101,21 @@ class HDF5ActivationBuffer:
         self.buffer_idx += 1
         # print("Returning batch: ", batch)        
         return batch
+
+
+class LocalLogger:
+    def __init__(self, log_dir):
+        self.log_dir = log_dir
+        os.makedirs(log_dir, exist_ok=True)
+        self.log_file = os.path.join(log_dir, f"logs.jsonl")
+
+    def log(self, data, step=None):
+        with open(self.log_file, "a") as f:
+            log_entry = {
+                "step": step,
+                "timestamp": datetime.now().isoformat(),
+            }
+            for k, v in data.items():
+                log_entry[k] = v
+            json.dump(log_entry, f)
+            f.write("\n")  # Add a newline for JSONL format
