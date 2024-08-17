@@ -37,29 +37,38 @@ class HDF5ActivationBuffer:
             dtype=torch.float32):
         self.hdf5_path = hdf5_path
         self.batch_size = batch_size
+        self.full_buffer_size = buffer_size
         self.buffer_size = buffer_size
         assert self.batch_size <= self.buffer_size
         self.device = device
+        self.dtype = dtype
 
         if self.buffer_size % self.batch_size != 0:
             print("Warning: batch size not a multiple of buffer size, so some activations will be skipped.")
 
         with h5py.File(self.hdf5_path, 'r') as f:
             self.n_activations = f['activations'].shape[0]
-            self.buffer = torch.from_numpy(
-                f['activations'][:self.buffer_size], 
-            ).to(self.device, dtype=dtype)
-            self.activation_dim = self.buffer.shape[1]
-            # print("Loaded activations from HDF5 file, shape:", self.buffer.shape)
-            self.buffer_size = min(self.buffer_size, self.n_activations)
-            self.skip = self.buffer_size // self.batch_size
-            # print("Buffer size:", self.buffer_size)
-            # print("Skip size:", self.skip)
-            # print("n_activations:", self.n_activations)
-        
-        self.buffer_idx = 0
-        self.file_idx = 0
+            self.activation_dim = f['activations'].shape[1]
+
+        self.reset()
     
+    def reset(self):
+        """Reset the buffer to the beginning of the file."""
+        self.file_idx = 0
+        self.buffer_idx = 0
+        self.buffer_size = self.full_buffer_size
+        self._load_buffer()
+    
+    def _load_buffer(self):
+        """Load the next buffer of activations from the file."""
+        with h5py.File(self.hdf5_path, 'r') as f:
+            end_idx = min(self.file_idx + self.buffer_size, self.n_activations)
+            self.buffer = torch.from_numpy(
+                f['activations'][self.file_idx:end_idx], 
+            ).to(self.device, dtype=self.dtype)
+        self.buffer_size = len(self.buffer)
+        self.skip = self.buffer_size // self.batch_size
+
     def __iter__(self):
         return self
     
@@ -72,36 +81,20 @@ class HDF5ActivationBuffer:
         The buffer size is not necessarily constant, since the last buffer
             may be smaller than buffer_size.
         """
-        # print("NEXT HAS BEEN CALLED---------------------") 
-        # print("> buffer_idx:", self.buffer_idx)
-        # print("> file_idx:", self.file_idx)
-        # print("> skip:", self.skip)
         if self.buffer_idx >= self.skip:
             self.file_idx += self.buffer_size
             if self.file_idx >= self.n_activations:
+                self.reset()
                 raise StopIteration
             else:
-                with h5py.File(self.hdf5_path, 'r') as f:
-                    self.buffer = torch.from_numpy(
-                        f['activations'][self.file_idx:self.file_idx+self.buffer_size], 
-                    ).to(self.device, dtype=self.buffer.dtype)
-                    if len(self.buffer) < self.buffer_size:
-                        print("Warning: buffer is smaller than set buffer size, due to end of file.")
-                    self.buffer_size = len(self.buffer)
-                    self.skip = self.buffer_size // self.batch_size
+                self._load_buffer()
                 self.buffer_idx = 0
-        # print("After possible buffer reload:")  
-        # print("> buffer_idx:", self.buffer_idx)
-        # print("> file_idx:", self.file_idx)
-        # print("> skip:", self.skip)
 
         batch_idxs = torch.arange(self.buffer_idx, self.buffer_size, self.skip)[:self.batch_size]
         batch = self.buffer[batch_idxs]
 
         self.buffer_idx += 1
-        # print("Returning batch: ", batch)        
         return batch
-
 
 class LocalLogger:
     def __init__(self, log_dir):

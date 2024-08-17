@@ -6,79 +6,114 @@ import torch as t
 import torch.nn as nn
 
 from ..dictionary import StructuredAutoEncoderTopK
-from ..ops import low_rank_mvm
+from ..ops import sum_kronecker_mvm
 from ..dictionary_learning.trainers.trainer import SAETrainer
 from ..dictionary_learning.trainers.top_k import geometric_median
 
-class LowRankAutoEncoderTopK(StructuredAutoEncoderTopK):
+class SumKroneckerAutoEncoderTopK(StructuredAutoEncoderTopK):
     """
     Structured autoencoder with low-rank encoder and decoder.
     """
 
-    def __init__(self, activation_dim: int, dict_size: int, k: int, rank: int):
+    def __init__(self, activation_dim: int, dict_size: int, k: int, 
+            r: int, d1: int, d2: int, d3: int, d4: int, prepost=True):
         super().__init__(activation_dim, dict_size, k)
-        self.rank = rank
-        self.enc_W1 = nn.Parameter(t.empty(dict_size, rank))
-        self.enc_W2 = nn.Parameter(t.empty(activation_dim, rank))
-        self.dec_W1 = nn.Parameter(t.empty(activation_dim, rank))
-        self.dec_W2 = nn.Parameter(t.empty(dict_size, rank))
+        assert d1 * d3 == dict_size 
+        assert d2 * d4 == activation_dim
+        self.r = r
+        self.d1 = d1
+        self.d2 = d2
+        self.d3 = d3
+        self.d4 = d4
+        self.prepost = prepost
+        
+        self.enc_L = nn.Parameter(t.empty(r, d1, d2))
+        self.enc_R = nn.Parameter(t.empty(r, d3, d4))
+        if prepost:
+            self.enc_V = nn.Parameter(t.eye(activation_dim))
+        self.dec_L = nn.Parameter(t.empty(r, d2, d1))
+        self.dec_R = nn.Parameter(t.empty(r, d4, d3))
+        if prepost:
+            self.dec_V = nn.Parameter(t.eye(activation_dim))
 
         # first initialize as standard normal
-        self.enc_W1.data.normal_(0., 1.)
-        self.enc_W2.data.normal_(0., 1.)
-        self.dec_W1.data = self.enc_W2.data.clone() # tie weights at initialization
-        self.dec_W2.data = self.enc_W1.data.clone() # tie weights at initialization
+        self.enc_L.data.normal_(0., 1.)
+        self.enc_R.data.normal_(0., 1.)
+        self.dec_L.data = self.enc_R.data.clone().transpose(1, 2) # tie weights at initialization
+        self.dec_R.data = self.enc_L.data.clone().transpose(1, 2) # tie weights at initialization
 
         # set encoder scale to match dense encoder variance
-        enc_var = 1 / (3 * activation_dim) # desired variance of the dense encoder
-        es = (enc_var / rank) ** 0.25      # std of W1, W2 so their product has desired variance
-        self.enc_W1.data *= es
-        self.enc_W2.data *= es
+        enc_var = 1 / (3 * activation_dim) # desired variance of dense encoder
+        es = (enc_var / r) ** 0.25         # std of of enc_L and enc_R
+        self.enc_L.data *= es
+        self.enc_R.data *= es
 
         # set decoder scale to match dense decoder variance
-        dec_var = 1 / activation_dim # desired variance of the dense decoder
-        ds = (dec_var / rank) ** 0.25 # std of W1, W2 so their product has desired variance
-        self.dec_W1.data *= ds
-        self.dec_W2.data *= ds
+        dec_var = 1 / activation_dim    # desired variance of dense decoder
+        ds = (dec_var / r) ** 0.25      # std of dec_L
+        self.dec_L.data *= ds
+        self.dec_R.data *= ds
 
     def encoder_mvm(self, x: t.Tensor) -> t.Tensor:
-        return low_rank_mvm(self.enc_W1, self.enc_W2, x)
+        if self.prepost:
+            x = self.enc_V @ x
+        return sum_kronecker_mvm(self.enc_L, self.enc_R, x)
     
     def decoder_mvm(self, x: t.Tensor) -> t.Tensor:
-        return low_rank_mvm(self.dec_W1, self.dec_W2, x)
+        x = sum_kronecker_mvm(self.dec_L, self.dec_R, x)
+        if self.prepost:
+            x = self.dec_V @ x
+        return x
     
     def encoder_feature(self, i: int) -> t.Tensor:
-        return self.enc_W2 @ self.enc_W1[i, :]
-        # (activation_dim, rank) @ (dict_size, rank)[i, :]
+        raise NotImplementedError
+        # li = i // self.d1 
+        # ri = i % self.d1
+        # f = t.einsum('si,sj->ij', self.enc_L[:, li, :], self.enc_R[:, ri, :]).reshape(self.r, self.d2 * self.d4)
+        # if self.prepost:
+        #     f = self.enc_V @ f
+        # return f
  
     def decoder_feature(self, i: int) -> t.Tensor:
-        return self.dec_W1 @ self.dec_W2[i, :] 
-        # (activation_dim, rank) @ (dict_size, rank)[i, :]
+        raise NotImplementedError
+        # li = i // self.d1
+        # ri = i % self.d1
+        # # f = torch.kron(self.dec_L[:, li], self.dec_R[:, ri])
+        # f = t.einsum('si,sj->ij', self.dec_L[:, :, li], self.dec_R[:, :, ri]).reshape(self.r, self.d2 * self.d4)
+        # if self.prepost:
+        #     f = f @ self.dec_V
+        # return f
     
     def from_pretrained(path, k: int, device=None):
         state_dict = t.load(path)
-        rank = state_dict['enc_W1'].shape[1]
-        dict_size = len(state_dict['encoder_bias'])
-        activation_dim = len(state_dict['b_dec'])
-        autoencoder = LowRankAutoEncoderTopK(activation_dim, dict_size, k, rank)
+        r = state_dict['enc_L'].shape[0]
+        d1 = state_dict['enc_L'].shape[1]
+        d2 = state_dict['enc_L'].shape[2]
+        d3 = state_dict['enc_R'].shape[1]
+        d4 = state_dict['enc_R'].shape[2]
+        dict_size = d1 * d3
+        activation_dim = d2 * d4
+        prepost = bool('enc_V' in state_dict)
+        autoencoder = SumKroneckerAutoEncoderTopK(activation_dim, dict_size, k, r, d1, d2, d3, d4, prepost)
         autoencoder.load_state_dict(state_dict)
         if device is not None:
             autoencoder.to(device)
         return autoencoder
 
 
-class TrainerLowRankTopK(SAETrainer):
+class TrainerSumKroneckerTopK(SAETrainer):
     """
     Top-K SAE training scheme.
     """
 
     def __init__(
         self,
-        dict_class=LowRankAutoEncoderTopK,
+        dict_class=SumKroneckerAutoEncoderTopK,
         activation_dim=512,
         dict_size=64 * 512,
-        rank=128,
         k=100,
+        r=32, d1=256, d2=32, d3=128, d4=16,
+        prepost=True, 
         auxk_alpha=0.0, # NO AUXK
         decay_start=24000,  # when does the lr decay start
         steps=30000,  # when when does training end
@@ -87,7 +122,7 @@ class TrainerLowRankTopK(SAETrainer):
         device=None,
         layer=None,
         lm_name=None,
-        wandb_name="LowRankAutoEncoderTopK",
+        wandb_name="SumKroneckerAutoEncoderTopK",
         submodule_name=None,
     ):
         super().__init__(seed)
@@ -105,7 +140,7 @@ class TrainerLowRankTopK(SAETrainer):
             t.cuda.manual_seed_all(seed)
 
         # Initialise autoencoder
-        self.ae = dict_class(activation_dim, dict_size, k=k, rank=rank)
+        self.ae = dict_class(activation_dim, dict_size, k=k, r=r, d1=d1, d2=d2, d3=d3, d4=d4, prepost=prepost)
         if device is None:
             self.device = "cuda" if t.cuda.is_available() else "cpu"
         else:

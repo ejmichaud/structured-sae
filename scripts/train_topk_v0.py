@@ -46,7 +46,7 @@ def main(args):
         wandb_entity="ericjmichaud_",
         wandb_project="structured-saes",
         steps=args.steps,
-        log_steps=1, 
+        log_steps=args.log_steps, 
         save_dir=args.save_dir, 
     )
 
