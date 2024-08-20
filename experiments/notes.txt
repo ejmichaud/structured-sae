@@ -1,0 +1,17 @@
+sum_kronecker0         directly fitting matrices, old
+topk_baselines0        OUTDATED due to hdf5actbuffer
+topk_baselines1        OUTDATED due to hdf5actbuffer
+topk_baselines2        OUTDATED due to hdf5actbuffer
+topk_baselines3        OUTDATED due to hdf5actbuffer
+topk_baselines4        DONE
+topk_baselines5        DONE
+topk_low_rank0         OUTDATED due to hdf5actbuffer and non-tied initialization scheme
+topk_low_rank1         OUTDATED due to hdf5actbuffer and non-tied initialization scheme
+topk_low_rank2         DONE, redo of topk_low_rank0
+topk_low_rank3         DONE, redo of topk_low_rank1
+topk_low_rank4         DONE, topk_low_rank2 except with 65k instead of 16k latents, technically didn't finish
+topk_sum_kronecker0    OUTDATED due to wrong choices of rs, also didn't finish
+topk_sum_kronecker1    RUNNING
+
+
+

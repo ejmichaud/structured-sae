@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=skron0
 #SBATCH --ntasks=1
-#SBATCH --mem=8GB
+#SBATCH --mem=24GB
 #SBATCH --gres=gpu:1
 #SBATCH --time=0-04:00:00
 #SBATCH --output=/om2/user/ericjm/structured-sae/experiments/sum_kronecker0/logs/slurm-%A_%a.out

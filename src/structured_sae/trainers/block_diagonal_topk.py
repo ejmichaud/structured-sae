@@ -6,110 +6,137 @@ import torch as t
 import torch.nn as nn
 
 from ..dictionary import StructuredAutoEncoderTopK
-from ..ops import sum_kronecker_mvm
+from ..ops import block_diagonal_mvm
 from ..dictionary_learning.trainers.trainer import SAETrainer
 from ..dictionary_learning.trainers.top_k import geometric_median
 
-class SumKroneckerAutoEncoderTopK(StructuredAutoEncoderTopK):
+class BlockDiagonalAutoEncoderTopK(StructuredAutoEncoderTopK):
     """
-    Structured autoencoder with low-rank encoder and decoder.
+    Structured autoencoder with block diagonal encoder and decoder
+    matrices. Includes leading (trailing) dense matrix multiplication
+    into `proj_dim` dimensions in the encoder (decoder).
+
+    TODO: think about where to include biases.
+        we just have to consider whether to put a bias in between
+        the first up-projection and the block diagonal matrix.
+        If we do this, then the transformation becomes:
+        Wx = B(Vx + b) = BVx + Bb
+        So ultimately we just get a new bias term Bb, which can
+        be absorbed into the encoder bias.
     """
 
     def __init__(self, activation_dim: int, dict_size: int, k: int, 
-            r: int, d1: int, d2: int, d3: int, d4: int, prepost=True):
+            proj_dim: int, blocks: int):
         super().__init__(activation_dim, dict_size, k)
-        assert d1 * d3 == dict_size 
-        assert d2 * d4 == activation_dim
-        self.r = r
-        self.d1 = d1
-        self.d2 = d2
-        self.d3 = d3
-        self.d4 = d4
-        self.prepost = prepost
-        
-        self.enc_L = nn.Parameter(t.empty(r, d1, d2))
-        self.enc_R = nn.Parameter(t.empty(r, d3, d4))
-        if prepost:
-            self.enc_V = nn.Parameter(t.eye(activation_dim))
-        self.dec_L = nn.Parameter(t.empty(r, d2, d1))
-        self.dec_R = nn.Parameter(t.empty(r, d4, d3))
-        if prepost:
-            self.dec_V = nn.Parameter(t.eye(activation_dim))
+        self.proj_dim = proj_dim
+        self.blocks = blocks
+        assert dict_size % blocks == 0
+        assert proj_dim % blocks == 0
+
+        self.enc_V = nn.Parameter(t.empty(proj_dim, activation_dim))
+        self.enc_B = nn.Parameter(t.empty(blocks, dict_size // blocks, proj_dim // blocks))
+        self.dec_V = nn.Parameter(t.empty(activation_dim, proj_dim))
+        self.dec_B = nn.Parameter(t.empty(blocks, proj_dim // blocks, dict_size // blocks))
 
         # first initialize as standard normal
-        self.enc_L.data.normal_(0., 1.)
-        self.enc_R.data.normal_(0., 1.)
-        self.dec_L.data = self.enc_L.data.clone().transpose(1, 2) # tie weights at initialization
-        self.dec_R.data = self.enc_R.data.clone().transpose(1, 2) # tie weights at initialization
+        self.enc_V.data.normal_(0., 1.)
+        self.enc_B.data.normal_(0., 1.)
+        self.dec_V.data = self.enc_V.data.clone().T                 # tie weights at init
+        self.dec_B.data = self.enc_B.data.clone().transpose(1, 2)   # tie weights at init
+
+        # elements of the encoder matrix are sums of proj_dim // blocks elements
+        # let vv be the variance of enc_V and vb be the variance of enc_B
+        # then the variance of the encoder matrix is blocks * vv * vb
+        # if we let vv = vb = v, then the variance of the encoder matrix is 
+        # blocks * v^2. If we want the var_enc = blocks * v^2, then
+        # v = sqrt(var_enc / blocks), so the standard deviation
+        # of enc_V and enc_B should be (var_enc / blocks) ** 0.25
 
         # set encoder scale to match dense encoder variance
         enc_var = 1 / (3 * activation_dim) # desired variance of dense encoder
-        es = (enc_var / r) ** 0.25         # std of of enc_L and enc_R
-        self.enc_L.data *= es
-        self.enc_R.data *= es
+        es = (enc_var / (self.proj_dim // blocks)) ** 0.25
+        self.enc_V.data *= es
+        self.enc_B.data *= es
 
         # set decoder scale to match dense decoder variance
         dec_var = 1 / activation_dim    # desired variance of dense decoder
-        ds = (dec_var / r) ** 0.25      # std of dec_L
-        self.dec_L.data *= ds
-        self.dec_R.data *= ds
+        ds = (dec_var / (self.proj_dim // blocks)) ** 0.25      # std of dec_L
+        self.dec_V.data *= ds
+        self.dec_B.data *= ds
 
     def encoder_mvm(self, x: t.Tensor) -> t.Tensor:
-        if self.prepost:
-            # x = self.enc_V @ x
-            x = t.matmul(x, self.enc_V.t())
-        return sum_kronecker_mvm(self.enc_L, self.enc_R, x)
-    
+        x = t.matmul(x, self.enc_V.t())
+        return block_diagonal_mvm(self.enc_B, x)
+
     def decoder_mvm(self, x: t.Tensor) -> t.Tensor:
-        x = sum_kronecker_mvm(self.dec_L, self.dec_R, x)
-        if self.prepost:
-            # x = self.dec_V @ x
-            x = t.matmul(x, self.dec_V.t())
+        x = block_diagonal_mvm(self.dec_B, x)
+        x = t.matmul(x, self.dec_V.t())
         return x
     
     def encoder_feature(self, i: int) -> t.Tensor:
+        """ 
+        if W = L @ R, then W_ij = sum_k L_ik R_kj
+        So W_i* = sum_k L_ik R_k* = L_i @ R
+        if L has shape (a, b)
+        if R has shape (b, c)
+        then W_i* has shape (b,) (b, c) = (c,), as desired
+        """
         assert i < self.dict_size
-        li = i // self.d3 
-        ri = i % self.d3
-        f = t.einsum('si,sj->ij', self.enc_L[:, li, :], self.enc_R[:, ri, :]).reshape(self.d2 * self.d4,)
-        if self.prepost:
-            f = f @ self.enc_V
-        return f
+        bi = i // (self.dict_size // self.blocks)
+        ri = i % (self.dict_size // self.blocks)
+        br = self.enc_B[bi, ri, :] # has length proj_dim // blocks
+        v_start = bi * (self.proj_dim // self.blocks)
+        v_end = v_start + self.proj_dim // self.blocks
+        return br @ self.enc_V[v_start:v_end, :]
  
     def decoder_feature(self, i: int) -> t.Tensor:
+        """ 
+        W = V B
+        has shape (activation_dim, dict_size)
+        we want the ith column, which has length activation_dim
+        W_*j = sum_k V_*k B_kj
+        """
         assert i < self.dict_size
-        li = i // self.d3
-        ri = i % self.d3
-        f = t.einsum('si,sj->ij', self.dec_L[:, :, li], self.dec_R[:, :, ri]).reshape(self.d2 * self.d4)
-        if self.prepost:
-            f = self.dec_V @ f
-        return f
+        # get the right column of dec_B
+        bi = i // (self.dict_size // self.blocks)
+        ri = i % (self.dict_size // self.blocks)
+        bc = self.dec_B[bi, :, ri] # has length proj_dim // blocks
+        v_start = bi * (self.proj_dim // self.blocks)
+        v_end = v_start + self.proj_dim // self.blocks
+        return self.dec_V[:, v_start:v_end] @ bc
+        # li = i // self.d3
+        # ri = i % self.d3
+        # f = t.einsum('si,sj->ij', self.dec_L[:, :, li], self.dec_R[:, :, ri]).reshape(self.d2 * self.d4)
+        # if self.prepost:
+        #     f = self.dec_V @ f
+        # return f
     
     def from_pretrained(path, k: int, device=None):
-        state_dict = t.load(path)
-        r = state_dict['enc_L'].shape[0]
-        d1 = state_dict['enc_L'].shape[1]
-        d2 = state_dict['enc_L'].shape[2]
-        d3 = state_dict['enc_R'].shape[1]
-        d4 = state_dict['enc_R'].shape[2]
-        dict_size = d1 * d3
-        activation_dim = d2 * d4
-        prepost = bool('enc_V' in state_dict)
-        autoencoder = SumKroneckerAutoEncoderTopK(activation_dim, dict_size, k, r, d1, d2, d3, d4, prepost)
-        autoencoder.load_state_dict(state_dict)
-        if device is not None:
-            autoencoder.to(device)
-        return autoencoder
+        raise NotImplementedError
+        # state_dict = t.load(path)
+        # r = state_dict['enc_L'].shape[0]
+        # d1 = state_dict['enc_L'].shape[1]
+        # d2 = state_dict['enc_L'].shape[2]
+        # d3 = state_dict['enc_R'].shape[1]
+        # d4 = state_dict['enc_R'].shape[2]
+        # dict_size = d1 * d3
+        # activation_dim = d2 * d4
+        # prepost = bool('enc_V' in state_dict)
+        # autoencoder = BlockDiagonalAutoEncoderTopK(activation_dim, dict_size, k, r, d1, d2, d3, d4, prepost)
+        # autoencoder.load_state_dict(state_dict)
+        # if device is not None:
+        #     autoencoder.to(device)
+        # return autoencoder
 
 
-class TrainerSumKroneckerTopK(SAETrainer):
+class TrainerBlockDiagonalTopK(SAETrainer):
     """
     Top-K SAE training scheme.
     """
 
     def __init__(
         self,
-        dict_class=SumKroneckerAutoEncoderTopK,
+        dict_class=BlockDiagonalAutoEncoderTopK,
         activation_dim=512,
         dict_size=64 * 512,
         k=100,
@@ -123,7 +150,7 @@ class TrainerSumKroneckerTopK(SAETrainer):
         device=None,
         layer=None,
         lm_name=None,
-        wandb_name="SumKroneckerAutoEncoderTopK",
+        wandb_name="BlockDiagonalAutoEncoderTopK",
         submodule_name=None,
     ):
         super().__init__(seed)
@@ -271,23 +298,19 @@ class TrainerSumKroneckerTopK(SAETrainer):
     @property
     def config(self):
         return {
-            "trainer_class": "TrainerSumKroneckerTopK",
-            "dict_class": "SumKroneckerAutoEncoderTopK",
+            "trainer_class": "TrainerBlockDiagonalTopK",
+            "dict_class": "BlockDiagonalAutoEncoderTopK",
             "lr": self.lr,
             "steps": self.steps,
             "seed": self.seed,
             "activation_dim": self.ae.activation_dim,
             "dict_size": self.ae.dict_size,
             "k": self.ae.k,
-            "r": self.ae.r,
-            "d1": self.ae.d1,
-            "d2": self.ae.d2,
-            "d3": self.ae.d3,
-            "d4": self.ae.d4,
+            "blocks": self.ae.blocks,
+            "proj_dim": self.ae.proj_dim,
             "device": self.device,
             "layer": self.layer,
             "lm_name": self.lm_name,
             "wandb_name": self.wandb_name,
             "submodule_name": self.submodule_name,
         }
-
