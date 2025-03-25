@@ -140,8 +140,8 @@ class TrainerBlockDiagonalTopK(SAETrainer):
         activation_dim=512,
         dict_size=64 * 512,
         k=100,
-        r=32, d1=256, d2=32, d3=128, d4=16,
-        prepost=True, 
+        proj_dim=2*512,
+        blocks=8,
         auxk_alpha=0.0, # NO AUXK
         decay_start=24000,  # when does the lr decay start
         steps=30000,  # when when does training end
@@ -168,7 +168,7 @@ class TrainerBlockDiagonalTopK(SAETrainer):
             t.cuda.manual_seed_all(seed)
 
         # Initialise autoencoder
-        self.ae = dict_class(activation_dim, dict_size, k=k, r=r, d1=d1, d2=d2, d3=d3, d4=d4, prepost=prepost)
+        self.ae = dict_class(activation_dim, dict_size, k=k, proj_dim=proj_dim, blocks=blocks)
         if device is None:
             self.device = "cuda" if t.cuda.is_available() else "cpu"
         else:
